@@ -211,6 +211,7 @@ module Internal = struct
   (* [get_data t] attempts to read data into [t.buf].  If the read gets data, [get_data]
      returns [`Ok], otherwise it returns [`Eof]. *)
   let get_data t : [ `Ok | `Eof ] Deferred.t  =
+    Debug.log_string "reader0: get_data";
     Deferred.create (fun result ->
       t.open_flags
       >>> fun open_flags ->
@@ -375,18 +376,28 @@ module Internal = struct
      [with_nonempty_buffer] must be called with [t.state] as [`Closed] or [`In_use].  It
      guarantees that if [f `Ok] is called, that [t.state = `In_use]. *)
   let with_nonempty_buffer (type a) t (f : [ `Ok | `Eof ] -> a) : a Deferred.t =
+    Debug.log_string "with_non_empty_buffer";
     match t.state with
     | `Not_in_use -> assert false
     | `Closed -> return (f `Eof)
     | `In_use ->
       if t.available > 0
-      then (return (f `Ok))
+      then
+        (
+          Debug.log_string
+            (sprintf "t.available > 0 : %d" t.available);
+          return (f `Ok)
+        )
       else (
-        let%map ok_or_eof = get_data t in
+          Debug.log_string
+            (sprintf "t.available = 0 : %d" t.available);
+         let%map ok_or_eof = get_data t in
         match t.state with
         | `Not_in_use -> assert false
         | `Closed -> f `Eof
-        | `In_use -> f ok_or_eof)
+        | `In_use ->
+          Debug.log_string "reader0:with_non_empty_buffer: f ok_or_eof";
+          f ok_or_eof)
   ;;
 
   (* [with_nonempty_buffer' t f] is an optimized version of
@@ -412,10 +423,13 @@ module Internal = struct
   ;;
 
   let consume t amount =
+    Debug.log_string (sprintf "reader0: consume amount=%d" amount);
     assert (0 <= amount && amount <= t.available);
     t.pos <- t.pos + amount;
+    Debug.log_string (sprintf "reader0: consumed amount=%d" amount);
     t.available <- t.available - amount;
-  ;;
+    Debug.log_string (sprintf "reader0: consumed amount=%d, new avail=%d" amount t.available);
+   ;;
 
   type 'a handle_chunk_result =
     [ `Stop of 'a
@@ -593,12 +607,18 @@ module Internal = struct
   let really_read t ?pos ?len s = really_read_substring t (Substring.create s ?pos ?len)
 
   let read_char t =
-    with_nonempty_buffer t (function
+    Debug.log_string "reader0: read_char start";
+    let%bind c = with_nonempty_buffer t (function
       | `Eof -> `Eof
       | `Ok ->
         let c = t.buf.{ t.pos } in
         consume t 1;
-        `Ok c)
+        `Ok c) in
+    (match c with
+     | `Ok c ->
+       Debug.log_string (sprintf "reader0: read_char done: %c" c)
+     | `Eof -> Debug.log_string "read_char returns eof");
+    return c;
   ;;
 
   let first_char t p =
@@ -1028,45 +1048,70 @@ let finished_read t =
 ;;
 
 let do_read t f =
+  Debug.log_string "do_read: start";
   use t;
+  Debug.log_string "do_read: use t";
   let%map x = f () in
+  Debug.log_string "do_read: f ()";
   finished_read t;
+  Debug.log_string "do_read: finished_read t";
   x
 ;;
 
 let peek t ~len =
+  Debug.log_string "peek";
   if len < 0 then (raise_s [%message "[Reader.peek] got negative len" (len : int)]);
   do_read t (fun () -> peek t ~len);
 ;;
 
-let read t ?pos ?len s    = do_read t (fun () -> read t ?pos ?len s)
-let read_char t           = do_read t (fun () -> read_char t)
-let read_substring t s    = do_read t (fun () -> read_substring t s)
-let read_bigsubstring t s = do_read t (fun () -> read_bigsubstring t s)
+let read t ?pos ?len s    = 
+  Debug.log_string "read";
+  do_read t (fun () -> read t ?pos ?len s)
+let read_char t           =
+  Debug.log_string "read_char (internal)";
+  do_read t (fun () -> read_char t) >>|
+  function
+  | `Ok c ->
+    Debug.log_string (sprintf "reader0: read_char: returning %c" c); `Ok c
+  | `Eof -> `Eof
+let read_substring t s    = 
+  Debug.log_string "read_substring";
+  do_read t (fun () -> read_substring t s)
+let read_bigsubstring t s =
+  Debug.log_string "read_bigsubstring";
+  do_read t (fun () -> read_bigsubstring t s)
 
 let read_one_chunk_at_a_time t ~handle_chunk =
+  Debug.log_string "read_one_chunk_at_a_time";
   do_read t (fun () -> read_one_chunk_at_a_time t ~handle_chunk)
 ;;
 
 let read_one_iobuf_at_a_time t ~handle_chunk =
-  do_read t (fun () -> read_one_iobuf_at_a_time t ~handle_chunk)
+  Debug.log_string "read_one_io_buf_at_atime";
+   do_read t (fun () -> read_one_iobuf_at_a_time t ~handle_chunk)
 ;;
 
 let really_read t ?pos ?len s =
+  Debug.log_string "really_read";
   do_read t (fun () -> really_read t ?pos ?len s)
 ;;
 
 let really_read_substring t s =
-  do_read t (fun () -> really_read_substring t s)
+  Debug.log_string "really_read_substring";
+   do_read t (fun () -> really_read_substring t s)
 ;;
 
 let really_read_bigsubstring t s =
   do_read t (fun () -> really_read_bigsubstring t s)
 ;;
 
-let read_line t = do_read t (fun () -> read_line t)
+let read_line t =
+  Debug.log_string "read_line";
+  do_read t (fun () -> read_line t)
 
-let really_read_line ~wait_time t = do_read t (fun () -> really_read_line ~wait_time t)
+let really_read_line ~wait_time t =
+  Debug.log_string "really_read_line";
+  do_read t (fun () -> really_read_line ~wait_time t)
 
 (* [do_read_k] takes a [read_k] function that takes a continuation expecting an
    [Or_error.t].  It uses this to do a read returning a deferred.  This allows it to call
@@ -1076,7 +1121,8 @@ let do_read_k
       t
       (read_k : (r Or_error.t -> unit) -> unit)
       (make_result : r -> r') : r' Deferred.t =
-  use t;
+  Debug.log_string "do_read_k";
+   use t;
   Deferred.create (fun result ->
     read_k (fun r ->
       finished_read t;
@@ -1084,7 +1130,8 @@ let do_read_k
 ;;
 
 let read_until t p ~keep_delim =
-  do_read_k t (read_until t p ~keep_delim) Fn.id
+  Debug.log_string "read_until";
+   do_read_k t (read_until t p ~keep_delim) Fn.id
 ;;
 
 let read_until_max t p ~keep_delim ~max =
@@ -1130,7 +1177,9 @@ let read_all t read_one = read_all t read_one
 
 let lines t = use t; lines t
 
-let contents t = do_read t (fun () -> contents t)
+let contents t = 
+  Debug.log_string "contents";
+  do_read t (fun () -> contents t)
 
 let file_contents file = with_file file ~f:contents
 
@@ -1142,6 +1191,7 @@ let file_lines file =
 let transfer t = use t; transfer t
 
 let lseek t offset ~mode =
+  Debug.log_string "lseek";
   do_read t (fun () ->
     t.pos <- 0;
     t.available <- 0;
@@ -1149,7 +1199,8 @@ let lseek t offset ~mode =
 ;;
 
 let ltell t =
-  do_read t (fun () ->
+  Debug.log_string "ltell";
+   do_read t (fun () ->
     let%map fd_offset = Unix_syscalls.lseek t.fd Int64.zero ~mode:`Cur in
     Int64.( - ) fd_offset (Int64.of_int t.available))
 ;;
